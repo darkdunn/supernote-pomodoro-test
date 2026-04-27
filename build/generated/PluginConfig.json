@@ -1,0 +1,14 @@
+﻿{
+    "reactPackages":  [
+                          "com.mdf.supernotepomodoro.pomodoro.PomodoroNativePackage"
+                      ],
+    "versionCode":  "6",
+    "pluginKey":  "SupernotePomodoro",
+    "iconPath":  "/icon.png",
+    "pluginID":  "9z87slt2pmdo4q1w",
+    "name":  "Pomodoro",
+    "jsMainPath":  "index",
+    "desc":  "A quick Supernote pomodoro timer with background countdown and non-blocking completion status.",
+    "versionName":  "0.0.6",
+    "nativeCodePackage":  "/app.npk"
+}

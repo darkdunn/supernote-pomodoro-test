@@ -1,0 +1,201 @@
+#+title: Pomodoro AlarmManager Follow-up Email
+#+date: 2026-04-18
+
+* Draft email
+
+Subject: Follow-up on Pomodoro AlarmManager.OnAlarmListener implementation
+
+Hi,
+
+Thank you again for reviewing the Pomodoro plugin and for the recommendation to
+replace the static broadcast with =AlarmManager.OnAlarmListener=.
+
+I implemented that change and wanted to share exactly what I tried, because the
+timer completion callback still does not appear to work reliably on my device.
+
+The current implementation is pushed here:
+
+- Scheduler:
+  [[https://github.com/guibor/supernote-pomodoro/blob/main/android/app/src/main/java/com/mdf/supernotepomodoro/pomodoro/PomodoroAlarmScheduler.kt#L10-L57][PomodoroAlarmScheduler.kt]]
+- Completion callback:
+  [[https://github.com/guibor/supernote-pomodoro/blob/main/android/app/src/main/java/com/mdf/supernotepomodoro/pomodoro/PomodoroCompletionNotifier.kt#L8-L23][PomodoroCompletionNotifier.kt]]
+- Timer state:
+  [[https://github.com/guibor/supernote-pomodoro/blob/main/android/app/src/main/java/com/mdf/supernotepomodoro/pomodoro/PomodoroTimerStore.kt#L29-L51][PomodoroTimerStore.kt]]
+- React Native bridge:
+  [[https://github.com/guibor/supernote-pomodoro/blob/main/android/app/src/main/java/com/mdf/supernotepomodoro/pomodoro/PomodoroNativeModule.kt#L20-L60][PomodoroNativeModule.kt]]
+
+After your recommendation, I made these changes:
+
+- Removed the static broadcast receiver path from the plugin.
+- Replaced the old =PendingIntent= broadcast alarm with
+  =AlarmManager.OnAlarmListener=.
+- Store the active listener in =PomodoroAlarmScheduler= so it can be cancelled
+  if the timer is reset or restarted.
+- On alarm callback, call =PomodoroTimerStore.completeFromAlarm(...)= so the
+  timer state is forced to =completed= when the alarm fires.
+- Show a simple native =Toast= from =PomodoroCompletionNotifier.onAlarm(...)= so
+  there is a visible signal when the callback runs.
+
+I also tried a couple of follow-up approaches:
+
+- A visible =Activity= fallback launched by an exact alarm, so the timer could
+  wake the user even if the plugin view was closed.
+- Resolving the host application context via =ActivityThread.currentApplication()=
+  and scheduling the listener using that context rather than only the plugin
+  module context.
+
+The latest version currently uses the host-context =OnAlarmListener= approach:
+
+- =PomodoroAlarmScheduler.schedule(...)= resolves the host application context.
+- It calls =alarmManager.setExact(AlarmManager.RTC_WAKEUP, triggerAtMs, TAG,
+  listener, Handler(Looper.getMainLooper()))=.
+- The listener calls =PomodoroCompletionNotifier.onAlarm(realContext)=.
+- The notifier completes timer state and posts a =Toast= on the main looper.
+
+The relevant scheduler code is:
+
+#+begin_src kotlin
+private var currentListener: AlarmManager.OnAlarmListener? = null
+
+private fun getHostApplication(): Application? {
+    return try {
+        val activityThread = Class.forName("android.app.ActivityThread")
+        val currentApp = activityThread.getMethod("currentApplication")
+        currentApp.invoke(null) as? Application
+    } catch (error: Exception) {
+        Log.w(TAG, "Failed to resolve host Application", error)
+        null
+    }
+}
+
+fun schedule(context: Context, triggerAtMs: Long) {
+    val realContext = resolveContext(context)
+    val alarmManager = realContext.getSystemService(AlarmManager::class.java) ?: return
+
+    cancel(realContext)
+
+    val listener =
+        AlarmManager.OnAlarmListener {
+            PomodoroCompletionNotifier.onAlarm(realContext)
+        }
+    currentListener = listener
+
+    alarmManager.setExact(
+        AlarmManager.RTC_WAKEUP,
+        triggerAtMs,
+        TAG,
+        listener,
+        Handler(Looper.getMainLooper()),
+    )
+}
+#+end_src
+
+The completion callback currently forces the stored timer state to completed and
+then attempts to show a visible signal:
+
+#+begin_src kotlin
+object PomodoroCompletionNotifier {
+    fun onAlarm(context: Context) {
+        val snapshot = PomodoroTimerStore.completeFromAlarm(context)
+        if (snapshot.status != PomodoroTimerStore.STATUS_COMPLETED) {
+            return
+        }
+
+        Handler(Looper.getMainLooper()).post {
+            Toast.makeText(
+                context,
+                "Pomodoro ended",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+}
+#+end_src
+
+The timer store is deliberately conservative: it only completes a timer that is
+still marked as running, writes the completed snapshot, and cancels the retained
+listener:
+
+#+begin_src kotlin
+fun completeFromAlarm(context: Context): PomodoroTimerSnapshot {
+    val current = readStored(context)
+    if (current.status == STATUS_COMPLETED) {
+        return current
+    }
+
+    if (current.status != STATUS_RUNNING) {
+        return current
+    }
+
+    val completed =
+        PomodoroTimerSnapshot(
+            status = STATUS_COMPLETED,
+            durationMs = current.durationMs,
+            remainingMs = 0L,
+            endsAtMs = null,
+            updatedAtMs = System.currentTimeMillis(),
+        )
+
+    write(context, completed)
+    PomodoroAlarmScheduler.cancel(context)
+    return completed
+}
+#+end_src
+
+The React Native bridge schedules and cancels the listener from the normal timer
+actions:
+
+#+begin_src kotlin
+@ReactMethod
+fun startTimer(durationMinutes: Double, promise: Promise) {
+    val durationMs = (durationMinutes * 60_000.0).toLong().coerceAtLeast(60_000L)
+    val snapshot = PomodoroTimerStore.start(reactApplicationContext, durationMs)
+    PomodoroAlarmScheduler.schedule(
+        reactApplicationContext,
+        snapshot.endsAtMs ?: System.currentTimeMillis() + durationMs,
+    )
+    promise.resolve(snapshotToMap(snapshot))
+}
+
+@ReactMethod
+fun pauseTimer(promise: Promise) {
+    PomodoroAlarmScheduler.cancel(reactApplicationContext)
+    promise.resolve(snapshotToMap(PomodoroTimerStore.pause(reactApplicationContext)))
+}
+
+@ReactMethod
+fun resetTimer(promise: Promise) {
+    PomodoroAlarmScheduler.cancel(reactApplicationContext)
+    promise.resolve(snapshotToMap(PomodoroTimerStore.reset(reactApplicationContext)))
+}
+#+end_src
+
+Observed behavior:
+
+- Starting the timer works.
+- The plugin closes and returns to the note as expected.
+- When the timer should finish, I do not see the completion notification.
+- From user testing, it still behaves like "nothing happens" at countdown end.
+
+Could you clarify the intended working pattern for this case?
+
+1. Is =AlarmManager.OnAlarmListener= expected to continue firing after the
+   plugin view is closed and PluginHost is in the background, or only while the
+   plugin process remains alive?
+2. Is showing a =Toast= from the plugin/native module context supported, or
+   should completion be surfaced through a different PluginHost API?
+3. For a background timer that should notify the user after the plugin closes,
+   should we use a PluginHost-supported callback/notification mechanism instead
+   of Android =Activity=, =Toast=, or =PendingIntent=?
+4. If you have a small working example of a countdown completion callback for a
+   headless/closed plugin, I can adapt the Pomodoro plugin to that pattern.
+
+The relevant files in my current implementation are:
+
+- =PomodoroAlarmScheduler.kt=
+- =PomodoroCompletionNotifier.kt=
+- =PomodoroTimerStore.kt=
+- =PomodoroNativeModule.kt=
+
+Thanks,
+Michael

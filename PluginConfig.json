@@ -1,0 +1,10 @@
+{
+  "name": "Pomodoro",
+  "desc": "A quick Supernote pomodoro timer with background countdown and non-blocking completion status.",
+  "iconPath": "assets/icon.png",
+  "versionName": "0.0.6",
+  "versionCode": "6",
+  "pluginID": "9z87slt2pmdo4q1w",
+  "pluginKey": "SupernotePomodoro",
+  "jsMainPath": "index"
+}
